@@ -5,6 +5,7 @@ runner = "probe-rs run --chip nRF52840_xxAA --allow-erase-all"
 target = "thumbv7em-none-eabihf"
 rustflags = [
   "-C", "link-arg=-Tlink.x",
+  "-C", "link-arg=-Tdefmt.x"
 ]
 
 [env]
