@@ -1,5 +1,5 @@
 [target.thumbv7em-none-eabihf]
-runner = "probe-rs run --chip nRF52840_xxAA --allow-erase-all"
+runner = "probe-rs run --chip nRF52840_xxAA"
 
 [build]
 target = "thumbv7em-none-eabihf"
@@ -10,3 +10,4 @@ rustflags = [
 
 [env]
 DEFMT_LOG = "trace"
+BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/lib/gcc/x86_64-linux-gnu/11/include"
