@@ -303,8 +303,6 @@ fn test_search_for_uuid_invalid(iterations: usize) {
             (0, false)
         };
         
-        println!("Testing packet {:02X?}, Searching for UUID: {:04X}, Expected to find: {}", packet, search_uuid, should_find);
-        
         let result = if should_find {
             search_for_uuid(&packet, search_uuid)
         } else {
