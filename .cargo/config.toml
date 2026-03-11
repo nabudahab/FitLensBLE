@@ -9,5 +9,5 @@ rustflags = [
 ]
 
 [env]
-DEFMT_LOG = "trace"
+DEFMT_LOG = "info"
 BINDGEN_EXTRA_CLANG_ARGS = "-I/usr/include -I/usr/lib/gcc/x86_64-linux-gnu/13/include -I/usr/lib/gcc/x86_64-linux-gnu/11/include"
