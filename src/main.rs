@@ -15,17 +15,10 @@ use nrf_sdc::mpsl::MultiprotocolServiceLayer;
 use nrf_sdc::{self as sdc, mpsl};
 use static_cell::StaticCell;
 use trouble_host::gatt::GattClient;
-use trouble_host::attribute::Characteristic;
-use core::cell::RefCell;
-use heapless::Deque;
 use bt_hci::controller::ControllerCmdSync;
 use bt_hci::cmd::le::LeSetScanParams;
 use trouble_host::{Address, Host, HostResources, Controller};
-use trouble_host::prelude::{DefaultPacketPool, Scanner, ScanConfig, PhySet, BdAddr, EventHandler, LeAdvReportsIter, ConnectConfig, AddrKind};
-use trouble_host::connection::RequestedConnParams;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
-use embassy_sync::signal::Signal;
-use trouble_host::attribute::Uuid;
+use trouble_host::prelude::DefaultPacketPool;
 
 
 use {defmt_rtt as _, panic_probe as _};
@@ -43,13 +36,10 @@ bind_interrupts!(struct Irqs {
     RTC0 => nrf_sdc::mpsl::HighPrioInterruptHandler;
 });
 
-// Stop scan and ignore processing if a signal has been found
 #[embassy_executor::task]
 async fn mpsl_task(mpsl: &'static MultiprotocolServiceLayer<'static>) -> ! {
     mpsl.run().await
 }
-
-static HRM_FOUND: Signal<CriticalSectionRawMutex, (AddrKind, BdAddr)> = Signal::new();
 
 fn build_sdc<'d, const N: usize>(
     p: nrf_sdc::Peripherals<'d>,
@@ -126,64 +116,16 @@ where
         central, mut runner, ..
     } = stack.build();
 
-    let discover = Discover {
-        is_found: core::cell::Cell::new(false)
-    };
+    let discover = ble::Discover::new(hr::HR_UUID);
     
     let _ = join(runner.run_with_handler(&discover), async {
-        HRM_FOUND.reset();
-
-        let mut config = ScanConfig::default();
-        config.active = true;
-        config.phys = PhySet::M1;
-        config.interval = Duration::from_secs(1);
-        config.window = Duration::from_secs(1);
-
-        //Get the HRM address
-        let (target_kind, target_addr, mut central) = {
-            let mut scanner = Scanner::new(central);
-            let mut _session = scanner.scan(&config).await.unwrap();
-
-            //Wait for target addr to show up and then stop scanning
-            let (kind, addr) = HRM_FOUND.wait().await;
-            info!("Scan stopped. Found HRM Target {:?} of kind {:?}", addr, kind);
-
-            //Drop session to release the borrow
-            drop(_session);
-            //give central back
-            let central = scanner.into_inner();
-            (kind, addr, central)
-        };
+        let (target_kind, target_addr, mut central) = ble::acquire(central).await;
         
         // Let the scanner cancel event propagate to the controller 
         // to avoid Command Disallowed on LeCreateConn
         Timer::after_millis(50).await;
         
-        //Connect to the HRM.
-
-        //Create connection parameters
-        let connect_params = RequestedConnParams {
-            min_connection_interval: Duration::from_millis(80),
-            max_connection_interval: Duration::from_millis(80),
-            max_latency: 0,
-            min_event_length: Duration::from_millis(0),
-            max_event_length: Duration::from_millis(0),
-            supervision_timeout: Duration::from_secs(8)
-        };
-
-        //create connection object with target address and parameters
-        let accept = (target_kind, &target_addr);
-        let connect_config = ConnectConfig {
-            scan_config: ScanConfig {
-                filter_accept_list: core::slice::from_ref(&accept),
-                interval: Duration::from_millis(60),
-                window: Duration::from_millis(60),
-                ..Default::default()
-            },
-            connect_params,
-        };
-
-        match central.connect(&connect_config).await {
+        match ble::connect(&mut central, target_kind, target_addr).await {
             Ok(conn) => {
                 info!("Connected to HRM!");
                 
@@ -193,51 +135,8 @@ where
                     Ok(client) => {
                         let _ = join(client.task(), async {
                             info!("Fetching all services...");
-
-                            // Fetch Device Information Service to get the Manufacturer Name
-                            if let Ok(dis_services) = client.services_by_uuid(&Uuid::new_short(0x180a)).await {
-                                for service in dis_services {
-                                    let mut buf = [0u8; 64];
-                                    if let Ok(len) = client.read_characteristic_by_uuid(&service, &Uuid::new_short(0x2a29), &mut buf).await {
-                                        if let Ok(name) = core::str::from_utf8(&buf[..len]) {
-                                            info!("Manufacturer Name: {:?}", name);
-                                        } else {
-                                            info!("Manufacturer Name (raw): {:?}", &buf[..len]);
-                                        }
-                                    }
-                                }
-                            }
-
-                            match client.services_by_uuid(&Uuid::Uuid16(hr::HR_UUID.to_le_bytes())).await {
-                                Ok(services) => {
-                                    for service in services {
-                                        info!("Service UUID: {:?}", service.uuid());
-                                        
-                                        info!("Looking for value handle");
-                                        let c: Characteristic<&[u8]> = client
-                                            .characteristic_by_uuid(&service, &Uuid::new_short(hr::HR_CHAR_UUID))
-                                            .await
-                                            .unwrap();
-
-                                        info!("Subscribing notifications");
-                                        let mut listener = client.subscribe(&c, false).await.unwrap();
-
-                                        loop {
-                                            let data = listener.next().await;
-                                            if data.handle() == c.handle {
-                                                let raw = data.as_ref();
-                                                let hr = hr::parse_hr_packet(raw).bpm;
-                                                info!("Heartrate: {:?} bpm", hr);
-                                            } else {
-                                                info!("Got notification for different handle: {}, expected {}", data.handle(), c.handle);
-                                            }
-                                        }
-                                    }
-                                },
-                                Err(e) => {
-                                    info!("GATT Error fetching services: {:?}", defmt::Debug2Format(&e));
-                                }
-                            }
+                            crate::ble::read_device_info(&client).await;
+                            crate::hr::monitor_heart_rate(&client).await;
                         }).await;                        
                     },
                     Err(e) => {
@@ -245,39 +144,8 @@ where
                     }
                 }
             },
-            Err(e) => info!("Error Connecting: {:?}", defmt::Debug2Format(&e)),
+            Err(()) => info!("Error Connecting"),
         }
     })
     .await;
-}
-
-struct Discover {
-    is_found: core::cell::Cell<bool>,
-}
-
-impl EventHandler for Discover {
-    fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
-    
-    if self.is_found.get()
-    {
-        return;
-    }
-    
-    while let Some(Ok(report)) = it.next() {
-            // info!("discovered: {:?}", report.addr);
-            if ble::search_for_uuid(report.data, hr::HR_UUID) {
-                if let Some(mfg_id) = ble::search_for_manufacturer_id(report.data) {
-                    defmt::info!("Found HR device! Manufacturer ID: {:04X}", mfg_id);
-                } else {
-                    defmt::info!("Found HR device! (No manufacturer ID in this packet)");
-                }
-                
-                //Place report in mutex for main function to read
-                self.is_found.set(true);
-                HRM_FOUND.signal((report.addr_kind, report.addr));
-
-                return;
-            }
-        }
-    }
 }

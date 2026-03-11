@@ -1298,7 +1298,7 @@ dependencies = [
 [[package]]
 name = "trouble-example-apps"
 version = "0.1.0"
-source = "git+https://github.com/embassy-rs/trouble.git#cc921c10ad8d66f1ae59430ce6a149aeb44bab02"
+source = "git+https://github.com/embassy-rs/trouble.git#09b8d62e96fb6616a7d6d1ba5efb8a3db7c936e9"
 dependencies = [
  "bt-hci",
  "defmt 1.0.1",
@@ -1315,7 +1315,7 @@ dependencies = [
 [[package]]
 name = "trouble-host"
 version = "0.6.0"
-source = "git+https://github.com/embassy-rs/trouble.git#cc921c10ad8d66f1ae59430ce6a149aeb44bab02"
+source = "git+https://github.com/embassy-rs/trouble.git#09b8d62e96fb6616a7d6d1ba5efb8a3db7c936e9"
 dependencies = [
  "bt-hci",
  "defmt 1.0.1",
@@ -1334,7 +1334,7 @@ dependencies = [
 [[package]]
 name = "trouble-host-macros"
 version = "0.4.0"
-source = "git+https://github.com/embassy-rs/trouble.git#cc921c10ad8d66f1ae59430ce6a149aeb44bab02"
+source = "git+https://github.com/embassy-rs/trouble.git#09b8d62e96fb6616a7d6d1ba5efb8a3db7c936e9"
 dependencies = [
  "convert_case",
  "darling",
