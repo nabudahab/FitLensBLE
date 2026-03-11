@@ -56,11 +56,7 @@ fn build_sdc<'d, const N: usize>(
         .build(p, rng, mpsl, mem)
 }
 
-#[embassy_executor::main]
-async fn main(spawner: Spawner) {
-    //Peripheral init
-    let p = embassy_nrf::init(Default::default());
-
+fn ble_init(spawner: Spawner, p: embassy_nrf::Peripherals) -> sdc::SoftdeviceController<'static> {
     //MPSL peripherals (nRF Multiprotocol Service Layer)
     let mpsl_p = mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
     
@@ -85,13 +81,23 @@ async fn main(spawner: Spawner) {
     );
 
     //Random number generator for our MAC address
-    let mut rng = rng::Rng::new(p.RNG, Irqs);
+    static RNG: StaticCell<rng::Rng<Async>> = StaticCell::new();
+    let rng = RNG.init(rng::Rng::new(p.RNG, Irqs));
 
     //SDC memory setup
-    let mut sdc_mem = sdc::Mem::<2712>::new();
+    static SDC_MEM: StaticCell<sdc::Mem<2712>> = StaticCell::new();
+    let sdc_mem = SDC_MEM.init(sdc::Mem::<2712>::new());
     
     //Init SDC
-    let sdc = unwrap!(build_sdc(sdc_p, &mut rng, mpsl, &mut sdc_mem));
+    unwrap!(build_sdc(sdc_p, rng, mpsl, sdc_mem))
+}
+
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
+    //Peripheral init
+    let p = embassy_nrf::init(Default::default());
+
+    let sdc = ble_init(spawner, p);
 
     Timer::after(Duration::from_millis(200)).await;
 

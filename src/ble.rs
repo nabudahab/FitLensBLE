@@ -157,7 +157,7 @@ where
         connect_params,
     };
 
-    central.connect(&connect_config).await.map_err(|e| {
+    central.connect(&connect_config).await.map_err(|_e| {
         defmt::error!("Connect error!");
         ()
     })
