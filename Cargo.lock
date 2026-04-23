@@ -22,7 +22,6 @@ dependencies = [
  "nrf-sdc",
  "panic-halt",
  "panic-probe",
- "rand_core 0.6.4",
  "static_cell",
  "trouble-example-apps",
  "trouble-host",

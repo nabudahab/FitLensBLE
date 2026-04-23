@@ -1,13 +1,21 @@
-use embassy_time::{Duration};
+use embassy_time::{Duration, Timer, with_timeout};
 use core::cell::RefCell;
 use heapless::Deque;
 use trouble_host::prelude::{Scanner, ScanConfig, PhySet, BdAddr, EventHandler, LeAdvReportsIter, ConnectConfig, AddrKind, Central};
 use trouble_host::connection::{RequestedConnParams, Connection};
-use trouble_host::gatt::GattClient;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::signal::Signal;
+use crate::data;
 
-pub static DEVICE_FOUND: Signal<CriticalSectionRawMutex, (AddrKind, BdAddr)> = Signal::new();
+pub static DEVICE_FOUND: Signal<CriticalSectionRawMutex, (AddrKind, BdAddr, u16)> = Signal::new();
+
+fn target_label(uuid: u16) -> &'static str {
+    match uuid {
+        data::CPS_UUID => "power meter",
+        data::HR_UUID => "HRM",
+        _ => "unknown target",
+    }
+}
 
 pub fn search_for_manufacturer_id(data: &[u8]) -> Option<u16> {
     let size = data.len();
@@ -68,36 +76,70 @@ pub fn search_for_uuid(data: &[u8], uuid: u16) -> bool
 
 pub struct Discover {
     seen: RefCell<Deque<BdAddr, 128>>,
-    is_found: core::cell::Cell<bool>,
-    target_uuid: u16,
+    target_uuids: [u16; 2],
+    wanted_mask: core::sync::atomic::AtomicU8,
 }
 
 impl Discover {
-    pub fn new(target_uuid: u16) -> Self {
+    pub fn new(target_uuids: [u16; 2]) -> Self {
         Self {
             seen: RefCell::new(Deque::new()),
-            is_found: core::cell::Cell::new(false),
-            target_uuid,
+            target_uuids,
+            wanted_mask: core::sync::atomic::AtomicU8::new(3), // Both active
         }
+    }
+
+    pub fn set_wanted(&self, uuid: u16, wanted: bool) {
+        let mut mask = self.wanted_mask.load(core::sync::atomic::Ordering::Relaxed);
+        for (i, t_uuid) in self.target_uuids.iter().enumerate() {
+            if *t_uuid == uuid {
+                if wanted {
+                    mask |= 1 << i;
+                } else {
+                    mask &= !(1 << i);
+                }
+            }
+        }
+        self.wanted_mask.store(mask, core::sync::atomic::Ordering::Relaxed);
     }
 }
 
 impl EventHandler for Discover {
     fn on_adv_reports(&self, mut it: LeAdvReportsIter<'_>) {
-        if self.is_found.get() {
-            return;
-        }
         let mut seen = self.seen.borrow_mut();
         while let Some(Ok(report)) = it.next() {
             if seen.iter().find(|b| b.raw() == report.addr.raw()).is_none() {
-                if search_for_uuid(report.data, self.target_uuid) {
-                    if let Some(mfg_id) = search_for_manufacturer_id(report.data) {
-                        defmt::info!("Found HR device! Manufacturer ID: {:04X}", mfg_id);
-                    } else {
-                        defmt::info!("Found HR device! (No manufacturer ID in this packet)");
+                let mut found_uuid = None;
+                for uuid in self.target_uuids {
+                    if search_for_uuid(report.data, uuid) {
+                        found_uuid = Some(uuid);
+                        break;
                     }
-                    self.is_found.set(true);
-                    DEVICE_FOUND.signal((report.addr_kind, report.addr));
+                }
+
+                if let Some(found_uuid) = found_uuid {
+                    let mask = self.wanted_mask.load(core::sync::atomic::Ordering::Relaxed);
+                    let mut is_wanted = false;
+                    for (i, t_uuid) in self.target_uuids.iter().enumerate() {
+                        if *t_uuid == found_uuid && (mask & (1 << i)) != 0 {
+                            is_wanted = true;
+                            break;
+                        }
+                    }
+
+                    if is_wanted {
+                        let target = target_label(found_uuid);
+                        if let Some(mfg_id) = search_for_manufacturer_id(report.data) {
+                            defmt::info!("Found target BLE device ({})! Manufacturer ID: {:04X}", target, mfg_id);
+                        } else {
+                            defmt::info!("Found target BLE device ({})! (No manufacturer ID in this packet)", target);
+                        }
+                        DEVICE_FOUND.signal((report.addr_kind, report.addr, found_uuid));
+                    }
+                    
+                    // Always return early for our target UUIDs. This prevents them from
+                    // polluting the `seen` cache, allowing them to be rediscovered immediately
+                    // after disconnecting.
                     return;
                 }
                 if seen.is_full() {
@@ -109,7 +151,7 @@ impl EventHandler for Discover {
     }
 }
 
-pub async fn acquire<'a, C, P>(central: Central<'a, C, P>) -> (AddrKind, BdAddr, Central<'a, C, P>)
+pub async fn acquire<'a, C, P>(central: Central<'a, C, P>, target_uuid: u16) -> (AddrKind, BdAddr, Central<'a, C, P>)
 where
     C: trouble_host::Controller + bt_hci::controller::ControllerCmdSync<bt_hci::cmd::le::LeSetScanParams>,
     P: trouble_host::prelude::PacketPool
@@ -119,17 +161,125 @@ where
     let mut config = ScanConfig::default();
     config.active = true;
     config.phys = PhySet::M1;
-    config.interval = Duration::from_secs(1);
-    config.window = Duration::from_secs(1);
+    config.interval = Duration::from_millis(100);
+    config.window = Duration::from_millis(50);
 
     let mut scanner = Scanner::new(central);
-    let _session = scanner.scan(&config).await.unwrap();
 
-    let (kind, addr) = DEVICE_FOUND.wait().await;
-    defmt::info!("Scan stopped. Found Target {:?} of kind {:?}", addr, kind);
+    let (kind, addr) = loop {
+        let active_found = {
+            match scanner.scan(&config).await {
+                Ok(session) => {
+                    let found = loop {
+                        let found = DEVICE_FOUND.wait().await;
+                        if found.2 == target_uuid {
+                            break found;
+                        }
+                    };
+                    drop(session);
+                    Some(found)
+                }
+                Err(_) => None,
+            }
+        };
 
-    drop(_session);
-    (kind, addr, scanner.into_inner())
+        if let Some((kind, addr, _)) = active_found {
+            defmt::info!(
+                "Scan stopped. Found {} target {:?} of kind {:?}",
+                target_label(target_uuid),
+                addr,
+                kind
+            );
+            break (kind, addr);
+        }
+
+        defmt::warn!("Active scan start failed, retrying with passive fallback");
+
+        let mut fallback = ScanConfig::default();
+        fallback.active = false;
+        fallback.phys = PhySet::M1;
+        fallback.interval = Duration::from_millis(100);
+        fallback.window = Duration::from_millis(50);
+
+        let fallback_found = {
+            match scanner.scan(&fallback).await {
+                Ok(session) => {
+                    let found = loop {
+                        let found = DEVICE_FOUND.wait().await;
+                        if found.2 == target_uuid {
+                            break found;
+                        }
+                    };
+                    drop(session);
+                    Some(found)
+                }
+                Err(_) => None,
+            }
+        };
+
+        if let Some((kind, addr, _)) = fallback_found {
+            defmt::info!(
+                "Fallback scan found {} target {:?} kind {:?}",
+                target_label(target_uuid),
+                addr,
+                kind
+            );
+            break (kind, addr);
+        }
+
+        Timer::after_millis(500).await;
+    };
+
+    let central = scanner.into_inner();
+    (kind, addr, central)
+}
+
+pub async fn acquire_any<'a, C, P>(
+    central: Central<'a, C, P>,
+    scan_timeout: Duration,
+) -> (Option<(AddrKind, BdAddr, u16)>, Central<'a, C, P>)
+where
+    C: trouble_host::Controller + bt_hci::controller::ControllerCmdSync<bt_hci::cmd::le::LeSetScanParams>,
+    P: trouble_host::prelude::PacketPool,
+{
+    DEVICE_FOUND.reset();
+
+    let mut config = ScanConfig::default();
+    config.active = true;
+    config.phys = PhySet::M1;
+    config.interval = Duration::from_millis(100);
+    config.window = Duration::from_millis(50);
+
+    let mut scanner = Scanner::new(central);
+
+    let mut found = match scanner.scan(&config).await {
+        Ok(session) => {
+            let found = with_timeout(scan_timeout, DEVICE_FOUND.wait()).await.ok();
+            drop(session);
+            found
+        }
+        Err(_) => None,
+    };
+
+    if found.is_none() {
+        let mut fallback = ScanConfig::default();
+        fallback.active = false;
+        fallback.phys = PhySet::M1;
+        fallback.interval = Duration::from_millis(100);
+        fallback.window = Duration::from_millis(50);
+
+        found = match scanner.scan(&fallback).await {
+            Ok(session) => {
+                let found = with_timeout(scan_timeout, DEVICE_FOUND.wait()).await.ok();
+                drop(session);
+                found
+            }
+            Err(_) => None,
+        };
+    }
+
+    let central = scanner.into_inner();
+    (found, central)
 }
 
 pub async fn connect<'a, C, P>(central: &mut Central<'a, C, P>, target_kind: AddrKind, target_addr: BdAddr) -> Result<Connection<'a, P>, ()>
@@ -138,12 +288,12 @@ where
     P: trouble_host::prelude::PacketPool
 {
     let connect_params = RequestedConnParams {
-        min_connection_interval: Duration::from_millis(80),
-        max_connection_interval: Duration::from_millis(80),
+        min_connection_interval: Duration::from_millis(30),
+        max_connection_interval: Duration::from_millis(45),
         max_latency: 0,
         min_event_length: Duration::from_millis(0),
         max_event_length: Duration::from_millis(0),
-        supervision_timeout: Duration::from_secs(8),
+        supervision_timeout: Duration::from_secs(4),
     };
     
     let accept = (target_kind, &target_addr);
@@ -161,24 +311,4 @@ where
         defmt::error!("Connect error!");
         ()
     })
-}
-
-pub async fn read_device_info<C, P, const MAX_ATTRS: usize>(client: &GattClient<'_, C, P, MAX_ATTRS>)
-where
-    C: trouble_host::Controller,
-    P: trouble_host::prelude::PacketPool
-{
-    use trouble_host::attribute::Uuid;
-    if let Ok(dis_services) = client.services_by_uuid(&Uuid::new_short(0x180a)).await {
-        for service in dis_services {
-            let mut buf = [0u8; 64];
-            if let Ok(len) = client.read_characteristic_by_uuid(&service, &Uuid::new_short(0x2a29), &mut buf).await {
-                if let Ok(name) = core::str::from_utf8(&buf[..len]) {
-                    defmt::info!("Manufacturer Name: {:?}", name);
-                } else {
-                    defmt::info!("Manufacturer Name (raw): {:?}", &buf[..len]);
-                }
-            }
-        }
-    }
 }
