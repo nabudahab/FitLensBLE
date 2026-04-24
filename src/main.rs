@@ -32,11 +32,11 @@ use {defmt_rtt as _, panic_probe as _};
 const CONNECTIONS_MAX: usize = 2;
 const L2CAP_CHANNELS_MAX: usize = 4;
 const RECONNECT_RETRY_MS: u64 = 250;
-const SDC_MEM_BYTES: usize = 8192;
+const SDC_MEM_BYTES: usize = 2864;
 
 static MPSL_STORAGE: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
 static RNG_STORAGE: StaticCell<rng::Rng<Async>> = StaticCell::new();
-static SDC_MEM_STORAGE: StaticCell<sdc::Mem<SDC_MEM_BYTES>> = StaticCell::new();
+static mut SDC_MEM: core::mem::MaybeUninit<sdc::Mem<SDC_MEM_BYTES>> = core::mem::MaybeUninit::uninit();
 
 fn central_identity_address() -> Address {
     let ficr = embassy_nrf::pac::FICR;
@@ -269,22 +269,16 @@ async fn spi_task(mut spim: spim::Spim<'static>, mut ncs: Output<'static>) {
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     //Peripheral init
-    info!("Init embassy...");
-    cortex_m::asm::delay(32_000_000);
     let mut config = embassy_nrf::config::Config::default();
     config.lfclk_source = embassy_nrf::config::LfclkSource::InternalRC;
+    config.dcdc = embassy_nrf::config::DcdcConfig { reg1: false };
     let p = embassy_nrf::init(config);
-    info!("Init embassy done.");
-    cortex_m::asm::delay(32_000_000);
 
-    info!("Init SPI...");
     let mut config = spim::Config::default();
     config.frequency = spim::Frequency::M8;
 
     let spim = spim::Spim::new(p.SPI2, Irqs, p.P0_08, p.P0_09, p.P0_10, config);
     let ncs = Output::new(p.P0_11, Level::High, OutputDrive::Standard);
-    info!("Init SPI done.");
-    cortex_m::asm::delay(32_000_000);
 
     let mpsl_p =
         mpsl::Peripherals::new(p.RTC0, p.TIMER0, p.TEMP, p.PPI_CH19, p.PPI_CH30, p.PPI_CH31);
@@ -298,19 +292,15 @@ async fn main(spawner: Spawner) {
     let mpsl = MPSL_STORAGE.init(unwrap!(mpsl::MultiprotocolServiceLayer::new(
         mpsl_p, Irqs, lfclk_cfg
     )));
-    info!("Init MPSL done.");
-    cortex_m::asm::delay(32_000_000);
-    spawner.spawn(mpsl_task(mpsl).unwrap());
+    spawner.spawn(mpsl_task(mpsl).expect("REASON"));
 
     let sdc_p = sdc::Peripherals::new(
         p.PPI_CH17, p.PPI_CH18, p.PPI_CH20, p.PPI_CH21, p.PPI_CH22, p.PPI_CH23, p.PPI_CH24,
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
     let rng = RNG_STORAGE.init(rng::Rng::new(p.RNG, Irqs));
-    let sdc_mem = SDC_MEM_STORAGE.init(sdc::Mem::<SDC_MEM_BYTES>::new());
-    info!("Init SDC...");
+    let sdc_mem = unsafe { SDC_MEM.assume_init_mut() };
     let sdc = unwrap!(build_sdc(sdc_p, rng, mpsl, sdc_mem));
-    info!("Init SDC done.");
 
     // Run SPI sender in a completely separate task so it doesn't block the executor's BLE runner.
     spawner.spawn(spi_task(spim, ncs).unwrap());
@@ -324,12 +314,13 @@ pub async fn ble_run<C>(controller: C)
 where
     C: Controller + ControllerCmdSync<LeSetScanParams>,
 {
-    let mut resources: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> =
-        HostResources::new();
+    static mut RESOURCES: HostResources<DefaultPacketPool, CONNECTIONS_MAX, L2CAP_CHANNELS_MAX> = HostResources::new();
+    let resources = unsafe { core::ptr::addr_of_mut!(RESOURCES).as_mut().unwrap() };
+    
     let address = central_identity_address();
     info!("Central identity address = {:?}", address);
-    let stack = trouble_host::new(controller, &mut resources).set_random_address(address);
 
+    let stack = trouble_host::new(controller, resources).set_random_address(address);
     let Host {
         central: host_central,
         mut runner,
@@ -338,7 +329,9 @@ where
 
     let discover = ble::Discover::new([data::CPS_UUID, data::HR_UUID]);
 
+    info!("Starting join future...");
     let _ = join(runner.run_with_handler(&discover), async {
+        info!("Inside async block, initializing channels...");
         let power_channel = embassy_sync::channel::Channel::<
             embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex,
             trouble_host::prelude::Connection<'_, DefaultPacketPool>,
@@ -364,7 +357,9 @@ where
                     continue;
                 }
 
+                info!("Calling ble::acquire_any...");
                 let (found, c) = ble::acquire_any(central, Duration::from_secs(3)).await;
+                info!("acquire_any returned!");
                 central = c;
 
                 if let Some((kind, addr, uuid)) = found {

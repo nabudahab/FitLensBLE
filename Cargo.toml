@@ -42,3 +42,7 @@ embassy-time = { git = "https://github.com/embassy-rs/embassy.git", rev = "ed8d4
 embassy-time-driver = { git = "https://github.com/embassy-rs/embassy.git", rev = "ed8d4277cd8165c8b280ccbb1501534056691b6a" }
 embassy-embedded-hal = { git = "https://github.com/embassy-rs/embassy.git", rev = "ed8d4277cd8165c8b280ccbb1501534056691b6a" }
 embassy-hal-internal = { git = "https://github.com/embassy-rs/embassy.git", rev = "ed8d4277cd8165c8b280ccbb1501534056691b6a" }
+
+[profile.dev]
+opt-level = "s"
+
