@@ -1,4 +1,4 @@
-use embassy_time::{Duration, Timer, with_timeout};
+use embassy_time::{Duration, with_timeout};
 use core::cell::RefCell;
 use heapless::Deque;
 use trouble_host::prelude::{Scanner, ScanConfig, PhySet, BdAddr, EventHandler, LeAdvReportsIter, ConnectConfig, AddrKind, Central};
@@ -151,88 +151,7 @@ impl EventHandler for Discover {
     }
 }
 
-pub async fn acquire<'a, C, P>(central: Central<'a, C, P>, target_uuid: u16) -> (AddrKind, BdAddr, Central<'a, C, P>)
-where
-    C: trouble_host::Controller + bt_hci::controller::ControllerCmdSync<bt_hci::cmd::le::LeSetScanParams>,
-    P: trouble_host::prelude::PacketPool
-{
-    DEVICE_FOUND.reset();
 
-    let mut config = ScanConfig::default();
-    config.active = true;
-    config.phys = PhySet::M1;
-    config.interval = Duration::from_millis(100);
-    config.window = Duration::from_millis(50);
-
-    let mut scanner = Scanner::new(central);
-
-    let (kind, addr) = loop {
-        let active_found = {
-            match scanner.scan(&config).await {
-                Ok(session) => {
-                    let found = loop {
-                        let found = DEVICE_FOUND.wait().await;
-                        if found.2 == target_uuid {
-                            break found;
-                        }
-                    };
-                    drop(session);
-                    Some(found)
-                }
-                Err(_) => None,
-            }
-        };
-
-        if let Some((kind, addr, _)) = active_found {
-            defmt::info!(
-                "Scan stopped. Found {} target {:?} of kind {:?}",
-                target_label(target_uuid),
-                addr,
-                kind
-            );
-            break (kind, addr);
-        }
-
-        defmt::warn!("Active scan start failed, retrying with passive fallback");
-
-        let mut fallback = ScanConfig::default();
-        fallback.active = false;
-        fallback.phys = PhySet::M1;
-        fallback.interval = Duration::from_millis(100);
-        fallback.window = Duration::from_millis(50);
-
-        let fallback_found = {
-            match scanner.scan(&fallback).await {
-                Ok(session) => {
-                    let found = loop {
-                        let found = DEVICE_FOUND.wait().await;
-                        if found.2 == target_uuid {
-                            break found;
-                        }
-                    };
-                    drop(session);
-                    Some(found)
-                }
-                Err(_) => None,
-            }
-        };
-
-        if let Some((kind, addr, _)) = fallback_found {
-            defmt::info!(
-                "Fallback scan found {} target {:?} kind {:?}",
-                target_label(target_uuid),
-                addr,
-                kind
-            );
-            break (kind, addr);
-        }
-
-        Timer::after_millis(500).await;
-    };
-
-    let central = scanner.into_inner();
-    (kind, addr, central)
-}
 
 pub async fn acquire_any<'a, C, P>(
     central: Central<'a, C, P>,
@@ -276,6 +195,15 @@ where
             }
             Err(_) => None,
         };
+    }
+
+    if let Some((kind, addr, uuid)) = found {
+        defmt::info!(
+            "Scan stopped. Found {} target {:?} of kind {:?}",
+            target_label(uuid),
+            addr,
+            kind
+        );
     }
 
     let central = scanner.into_inner();

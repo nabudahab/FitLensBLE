@@ -13,11 +13,13 @@ pub const PAIRED_STREAM_HR: u8 = 1 << 0;
 pub const PAIRED_STREAM_POWER: u8 = 1 << 1;
 pub const PAIRED_STREAM_CADENCE: u8 = 1 << 2;
 
+#[allow(dead_code)]
 pub struct HeartRateData {
     pub bpm: u16,
     pub energy: Option<u16>,
 }
 
+#[allow(dead_code)]
 pub struct CyclingPowerData {
     pub instantaneous_power_w: i16,
     pub cadence_rpm: Option<u16>,
@@ -32,6 +34,7 @@ pub static POWER_TELEMETRY: Signal<CriticalSectionRawMutex, CyclingPowerData> = 
 
 static PAIRED_STREAMS: AtomicU8 = AtomicU8::new(0);
 
+#[allow(dead_code)]
 pub fn reset_paired_streams() {
     PAIRED_STREAMS.store(0, Ordering::Relaxed);
 }

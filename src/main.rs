@@ -31,7 +31,7 @@ use {defmt_rtt as _, panic_probe as _};
 /// Max number of connections
 const CONNECTIONS_MAX: usize = 2;
 const L2CAP_CHANNELS_MAX: usize = 4;
-const RECONNECT_RETRY_MS: u64 = 250;
+
 const SDC_MEM_BYTES: usize = 2864;
 
 static MPSL_STORAGE: StaticCell<MultiprotocolServiceLayer<'static>> = StaticCell::new();
@@ -49,76 +49,7 @@ fn central_identity_address() -> Address {
     Address::random(addr)
 }
 
-fn log_connection_event(event: &trouble_host::prelude::ConnectionEvent) {
-    match event {
-        trouble_host::prelude::ConnectionEvent::Disconnected { reason } => {
-            info!("BLE Event: Disconnected, reason={:?}", reason);
-        }
-        trouble_host::prelude::ConnectionEvent::PhyUpdated { tx_phy, rx_phy } => {
-            info!(
-                "BLE Event: PhyUpdated, tx={:?}, rx={:?}",
-                defmt::Debug2Format(tx_phy),
-                defmt::Debug2Format(rx_phy)
-            );
-        }
-        trouble_host::prelude::ConnectionEvent::ConnectionParamsUpdated {
-            conn_interval,
-            peripheral_latency,
-            supervision_timeout,
-        } => {
-            info!(
-                "BLE Event: ConnectionParamsUpdated, interval={:?}, latency={}, timeout={:?}",
-                defmt::Debug2Format(conn_interval),
-                peripheral_latency,
-                defmt::Debug2Format(supervision_timeout)
-            );
-        }
-        trouble_host::prelude::ConnectionEvent::DataLengthUpdated {
-            max_tx_octets,
-            max_tx_time,
-            max_rx_octets,
-            max_rx_time,
-        } => {
-            info!(
-                "BLE Event: DataLengthUpdated, tx_octets={}, tx_time={}, rx_octets={}, rx_time={}",
-                max_tx_octets, max_tx_time, max_rx_octets, max_rx_time
-            );
-        }
-        trouble_host::prelude::ConnectionEvent::FrameSpaceUpdated {
-            frame_space,
-            initiator,
-            phys,
-            spacing_types,
-        } => {
-            info!(
-                "BLE Event: FrameSpaceUpdated, frame_space={:?}, initiator={:?}, phys={:?}, spacing_types={:?}",
-                defmt::Debug2Format(frame_space),
-                defmt::Debug2Format(initiator),
-                defmt::Debug2Format(phys),
-                defmt::Debug2Format(spacing_types)
-            );
-        }
-        trouble_host::prelude::ConnectionEvent::ConnectionRateChanged {
-            conn_interval,
-            subrate_factor,
-            peripheral_latency,
-            continuation_number,
-            supervision_timeout,
-        } => {
-            info!(
-                "BLE Event: ConnectionRateChanged, interval={:?}, subrate={}, latency={}, cont_num={}, timeout={:?}",
-                defmt::Debug2Format(conn_interval),
-                subrate_factor,
-                peripheral_latency,
-                continuation_number,
-                defmt::Debug2Format(supervision_timeout)
-            );
-        }
-        trouble_host::prelude::ConnectionEvent::RequestConnectionParams(_) => {
-            info!("BLE Event: RequestConnectionParams");
-        }
-    }
-}
+
 
 bind_interrupts!(struct Irqs {
     RNG => rng::InterruptHandler<RNG>;
@@ -299,7 +230,7 @@ async fn main(spawner: Spawner) {
         p.PPI_CH25, p.PPI_CH26, p.PPI_CH27, p.PPI_CH28, p.PPI_CH29,
     );
     let rng = RNG_STORAGE.init(rng::Rng::new(p.RNG, Irqs));
-    let sdc_mem = unsafe { SDC_MEM.assume_init_mut() };
+    let sdc_mem = unsafe { &mut *core::ptr::addr_of_mut!(SDC_MEM).cast::<sdc::Mem<SDC_MEM_BYTES>>() };
     let sdc = unwrap!(build_sdc(sdc_p, rng, mpsl, sdc_mem));
 
     // Run SPI sender in a completely separate task so it doesn't block the executor's BLE runner.

@@ -4,7 +4,6 @@ use embassy_nrf::gpio::Output;
 const FRAME_TYPE_HEART_RATE: u8 = 0x01;
 const FRAME_TYPE_CYCLING_POWER: u8 = 0x02;
 const FRAME_TYPE_CYCLING_CADENCE: u8 = 0x03;
-const FRAME_END: u8 = 0xFF;
 
 async fn send_frame(
     spi: &mut Spim<'_>,
@@ -14,11 +13,10 @@ async fn send_frame(
 ) {
     ncs.set_low();
 
-    let mut frame = [0u8; 5];
+    let mut frame = [0u8; 4];
     frame[0] = frame_type;
     frame[1..3].copy_from_slice(&payload);
     frame[3] = 0x34;
-    frame[4] = FRAME_END;
 
     let _ = spi.write(&frame).await;
 
